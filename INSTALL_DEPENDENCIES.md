@@ -1,47 +1,56 @@
 # Text Index — Installing Python Dependencies
 
-This script requires Python packages that are **not** included with DaVinci Resolve. Install them into the Python interpreter used by Resolve.
+This script needs **PySide6** and **requests**. Resolve may use your system Python or its own bundled one — try the simple method first.
 
 ---
 
 ## Required packages
 
-| Package    | Purpose                     | Install command           |
-|-----------|-----------------------------|----------------------------|
-| **PySide6**  | GUI (Qt)                    | `pip install PySide6`      |
-| **requests** | HTTP (spell-check API)      | `pip install requests`     |
+| Package    | Purpose                | Install command           |
+|-----------|------------------------|----------------------------|
+| **PySide6**  | GUI (Qt)               | `pip install PySide6`      |
+| **requests** | HTTP (spell-check API) | `pip install requests`     |
 
 ---
 
-## Standard library (no installation)
+## Method 1: Standard install (try this first)
 
-These modules come with Python and do not need to be installed:
+On many systems, Resolve uses the same Python you use in the terminal (or one that sees your user-installed packages). In that case a normal install is enough:
 
-`sys`, `os`, `datetime`, `fractions`, `tempfile`, `csv`, `re`, `shutil`, `webbrowser`, `xml.etree.ElementTree`
+```bash
+pip3 install PySide6 requests
+```
+
+Or, if you use `pip`:
+
+```bash
+pip install PySide6 requests
+```
+
+Then run the script from **Workspace → Scripts** in Resolve. If it opens without “No module named 'PySide6'” (or similar), you’re done.
+
+**Tip:** In Resolve, **Preferences → System → General → External scripting** shows which Python interpreter Resolve uses. If it points to your system or user Python, Method 1 is the right one.
 
 ---
 
-## Step-by-step installation
+## Method 2: Install into Resolve’s Python (if Method 1 fails)
 
-### 1. Locate Resolve’s Python
-
-DaVinci Resolve uses its own bundled Python. You must install packages into **that** interpreter, not your system Python.
+If the script reports **No module named 'PySide6'** (or **requests**), Resolve is likely using its **bundled** Python, which doesn’t see packages you installed with `pip3` in the terminal. Install into that interpreter instead.
 
 **macOS:**
 
 ```bash
-# Resolve 18/19 (typical path; version number may vary)
-/Applications/DaVinci\ Resolve/DaVinci\ Resolve.app/Contents/Libraries/Frameworks/Python.framework/Versions/3.*/bin/python3 -m pip install PySide6 requests
+# Resolve 18/19 — path may vary (e.g. 3.10, 3.11)
+/Applications/DaVinci\ Resolve/DaVinci\ Resolve.app/Contents/Libraries/Frameworks/Python.framework/Versions/3.10/bin/python3 -m pip install PySide6 requests
 ```
 
-If the above fails, find the exact path:
+To find the exact version folder:
 
 ```bash
-# List Python versions inside Resolve.app
 ls "/Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/Libraries/Frameworks/Python.framework/Versions/"
-# Then use the full path, e.g.:
-# .../Versions/3.10/bin/python3 -m pip install PySide6 requests
 ```
+
+Then use that path, e.g. `.../Versions/3.11/bin/python3 -m pip install PySide6 requests`.
 
 **Windows:**
 
@@ -49,64 +58,59 @@ ls "/Applications/DaVinci Resolve/DaVinci Resolve.app/Contents/Libraries/Framewo
 "C:\Program Files\Blackmagic Design\DaVinci Resolve\python.exe" -m pip install PySide6 requests
 ```
 
-Adjust the path if you use a different Resolve version or install location (e.g. `DaVinci Resolve 19`).
+Adjust if your Resolve is in a different folder (e.g. `DaVinci Resolve 19`).
 
 **Linux:**
 
 ```bash
-# Path depends on your installation; examples:
+# Path depends on your install; examples:
 /opt/resolve/python3 -m pip install PySide6 requests
-# or
-/opt/resolve/libs/python3 -m pip install PySide6 requests
 ```
 
-### 2. Install the packages
+---
 
-Run the `pip install` command with Resolve’s Python as shown above. Example for macOS:
+## Verify
+
+With the **same** Python that Resolve uses (system one for Method 1, or Resolve’s path for Method 2):
 
 ```bash
-/Applications/DaVinci\ Resolve/DaVinci\ Resolve.app/Contents/Libraries/Frameworks/Python.framework/Versions/3.10/bin/python3 -m pip install PySide6 requests
+python3 -c "import PySide6; import requests; print('OK')"
 ```
 
-### 3. Verify
-
-Run this with the **same** Python that Resolve uses:
-
-```bash
-.../python3 -c "import PySide6; import requests; print('OK')"
-```
-
-If you see `OK`, dependencies are installed correctly.
+If you see `OK`, the script should run in Resolve.
 
 ---
 
 ## Install the script
 
 1. Copy `text-index.py` into Resolve’s Fusion Scripts folder:
-   - **macOS:** `~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/` (or a subfolder, e.g. `Utility/TextPlus/`)
+   - **macOS:** `~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/` (or a subfolder)
    - **Windows:** `C:\ProgramData\Blackmagic Design\DaVinci Resolve\Fusion\Scripts\`
 2. Restart Resolve if it was open.
-3. Run the script from **Workspace → Scripts** (menu path depends on where you placed the file).
+3. Run from **Workspace → Scripts**.
 
 ---
 
 ## Troubleshooting
 
 | Problem | What to do |
-|--------|-------------|
-| `No module named 'PySide6'` | Install PySide6 into Resolve’s Python (see paths above). Do not use system `pip` unless Resolve is set to use system Python. |
-| `No module named 'requests'` | Same: install requests with Resolve’s Python. |
-| Script not in Workspace menu | Check that the script is in the Fusion Scripts folder (or a subfolder). Restart Resolve. |
-| Wrong Python in use | In Resolve: **Preferences → System → General → External scripting** — note which Python is selected and install packages there. |
+|--------|------------|
+| `No module named 'PySide6'` or `requests` | You’re on Resolve’s bundled Python. Use **Method 2** and install with Resolve’s Python path. |
+| Script not in Workspace menu | Check the script is inside the Fusion Scripts folder (or a subfolder). Restart Resolve. |
+| Which Python does Resolve use? | **Preferences → System → General → External scripting** — the path shown there is the one that must have PySide6 and requests. |
 
 ---
 
 ## Optional: requirements.txt
 
-From the folder containing this README, you can install with Resolve’s Python:
+If you use Method 1 (system/user Python):
 
 ```bash
-/path/to/Resolve's/python3 -m pip install -r requirements.txt
+pip3 install -r requirements.txt
 ```
 
-Replace `/path/to/Resolve's/python3` with the actual path for your OS (see above).
+If you use Method 2 (Resolve’s Python), replace `python3` with Resolve’s interpreter path, e.g.:
+
+```bash
+/Applications/DaVinci\ Resolve/DaVinci\ Resolve.app/Contents/Libraries/Frameworks/Python.framework/Versions/3.10/bin/python3 -m pip install -r requirements.txt
+```
