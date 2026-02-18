@@ -1,0 +1,4 @@
+# Text Index — Python dependencies for DaVinci Resolve
+# Install with Resolve's Python: .../python3 -m pip install -r requirements.txt
+PySide6>=6.0
+requests>=2.25
