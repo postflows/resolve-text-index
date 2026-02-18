@@ -11,8 +11,8 @@ Provides a PySide6 UI to list text elements by type and timecode, edit in place,
 ## Requirements
 
 - DaVinci Resolve 18+
-- Python 3.6+ (Resolve’s bundled)
-- PySide6, requests (see installation instructions)
+- Python 3.6+
+- PySide6, requests (see [INSTALL_DEPENDENCIES.md](INSTALL_DEPENDENCIES.md) — standard pip first)
 
 ## Installation
 
@@ -20,7 +20,7 @@ Provides a PySide6 UI to list text elements by type and timecode, edit in place,
    - **macOS:** `~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/`
    - **Windows:** `C:\ProgramData\Blackmagic Design\DaVinci Resolve\Fusion\Scripts\`
 
-2. **Install Python dependencies** (required): PySide6 and requests must be installed into the Python interpreter used by Resolve. See **[INSTALL_DEPENDENCIES.md](INSTALL_DEPENDENCIES.md)** for step-by-step instructions (paths for macOS, Windows, Linux) and troubleshooting.
+2. **Install Python dependencies** (required): PySide6 and requests. If you don’t have Python, install **3.11–3.13** from [python.org](https://www.python.org/downloads/) (recommended). See **[INSTALL_DEPENDENCIES.md](INSTALL_DEPENDENCIES.md)** — standard `pip3 install PySide6 requests` first; use Resolve’s Python path only if the script reports a missing module.
 
 ## Usage
 
