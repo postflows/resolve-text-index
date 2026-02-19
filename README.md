@@ -6,7 +6,7 @@ Manage and navigate text elements (Text+, MultiText, Subtitles) on the timeline 
 
 ## What it does
 
-Provides a PySide6 UI to list text elements by type and timecode, edit in place, run regex search/replace, export to CSV and re-import with apply. Supports Yandex/LanguageTool spell-check in a background thread. Handles frame-accurate timecode and fractional FPS.
+Provides a PySide6 UI to list text elements by type and timecode, edit in place, run regex search/replace, export to CSV and re-import with apply. Supports LanguageTool spell-check (public API or local server) in a background thread. Handles frame-accurate timecode and fractional FPS.
 
 ## Requirements
 
@@ -24,7 +24,15 @@ Provides a PySide6 UI to list text elements by type and timecode, edit in place,
 
 ## Usage
 
-Run from Workspace > Scripts. Open timeline, run script. Use tree to select elements, edit text, use Search/Replace and CSV Export/Import as needed.
+Run from **Workspace → Scripts**. Open a timeline, run the script. Use the tree to select elements, edit text, and use Search/Replace and CSV Export/Import as needed.
+
+### Spell-check (LanguageTool)
+
+- **Check Spelling** opens a settings dialog where you can choose:
+  - **LanguageTool (Public API)** — uses the free online API (no setup).
+  - **LanguageTool (Local Server)** — uses a server on your machine (unlimited checks, no data sent online). On macOS with Homebrew you can **Start server** / **Stop server** directly from the dialog.
+
+For local server install and connection, see **[LANGUAGE_TOOL_SETUP.md](LANGUAGE_TOOL_SETUP.md)** (download, run, connect).
 
 ## License
 

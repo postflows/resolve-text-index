@@ -27,7 +27,7 @@ Key Features:
   - Smart text navigation (jump to source position)
 
 - Professional Tools:
-  - Dual spelling engines (Yandex/LanguageTool)
+  - Spelling check via LanguageTool (public API or local server)
   - Regex-powered search with multiple modes
   - Find and Replace functionality
   - CSV Export/Import: export Text+/MultiText/Subtitles to CSV, edit externally,
@@ -81,15 +81,17 @@ import tempfile
 import csv
 import re
 import shutil
-import webbrowser
+import time
+import platform
+import plistlib
 from xml.etree import ElementTree as ET
 from PySide6.QtWidgets import (QApplication, QMainWindow, QTreeWidget, QTreeWidgetItem, 
                               QVBoxLayout, QHBoxLayout, QWidget, QPushButton, QLabel, 
-                              QComboBox, QLineEdit, QTabWidget, QTextEdit, QCheckBox, QDialog, 
-                              QDialogButtonBox, QFileDialog, QMessageBox, QGroupBox, 
+                              QComboBox, QLineEdit, QTextEdit, QCheckBox, QDialog,
+                              QDialogButtonBox, QFileDialog, QMessageBox, QGroupBox,
                               QStyledItemDelegate, QMenu, QProgressBar, QRadioButton, QButtonGroup,
                               QTableWidget, QTableWidgetItem, QHeaderView)
-from PySide6.QtCore import Qt, Signal, QThread, QEvent
+from PySide6.QtCore import Qt, Signal, QThread, QEvent, QSettings, QTimer
 from PySide6.QtGui import QTextDocument, QTextOption, QShortcut, QKeySequence, QColor
 
 # Debugging onoff
@@ -285,74 +287,409 @@ class TextEditDelegate(QStyledItemDelegate):
         return False
 
 class SpellCheckerThread(QThread):
-    """Thread for spell-checking"""
-    progress = Signal(int, int)  
-    finished = Signal(list)  
-    error = Signal(str)  
+    """Thread for spell-checking via LanguageTool (public API or local server)."""
+    progress = Signal(int, int)
+    finished = Signal(list)
+    error = Signal(str)
 
-    def __init__(self, clips, spelling_service, language):
+    def __init__(self, clips, language, use_local=False, local_url=None):
         super().__init__()
         self.clips = clips
-        self.spelling_service = spelling_service
         self.language = language
+        self.use_local = use_local
+        self.local_url = (local_url or "").strip().rstrip("/") or "http://localhost:8081"
 
     def run(self):
         try:
             checked_clips = []
             total_clips = len(self.clips)
-            
+            base_url = self.local_url if self.use_local else None
             for i, clip in enumerate(self.clips):
                 try:
-                    if self.spelling_service == "Yandex Speller":
-                        clip["spelling_errors"] = self.check_spelling_yandex(clip["text"], lang="ru")
-                    else:
-                        clip["spelling_errors"] = self.check_spelling_languagetool(clip["text"], lang=self.language)
+                    clip["spelling_errors"] = self.check_spelling_languagetool(clip["text"], lang=self.language, base_url=base_url)
                     clip["is_checked"] = True
                     checked_clips.append(clip)
                     self.progress.emit(i + 1, total_clips)
                 except Exception as e:
                     print(f"Error checking clip: {str(e)}")
                     continue
-                    
             self.finished.emit(checked_clips)
         except Exception as e:
             self.error.emit(str(e))
 
-    def check_spelling_yandex(self, text, lang="ru"):
-        url = "http://speller.yandex.net/services/spellservice.json/checkText"
-        params = {"text": text, "lang": lang, "options": 6, "format": "plain"}
-        try:
-            response = requests.get(url, params=params)
-            if response.status_code == 200:
-                return response.json()
-        except Exception as e:
-            print(f"Yandex Speller error: {str(e)}")
-        return []
-
-    def check_spelling_languagetool(self, text, lang="Auto-Detect"):
-        url = "https://api.languagetool.org/v2/check"
+    def check_spelling_languagetool(self, text, lang="Auto-Detect", base_url=None):
+        url = (base_url + "/v2/check") if base_url else "https://api.languagetool.org/v2/check"
         data = {"text": text, "textType": "SUBTITLE", "disabledRules": "UPPERCASE_SENTENCE_START", "level": "default"}
         if lang and lang != "Auto-Detect":
             data["language"] = lang
         else:
             data["language"] = "auto"
-        
         try:
-            response = requests.post(url, data=data)
+            response = requests.post(url, data=data, timeout=30)
             if response.status_code == 200:
                 result = response.json()
                 errors = []
                 for match in result.get("matches", []):
                     if match.get("ruleId") != "UPPERCASE_SENTENCE_START":
-                        error = {
-                            "word": match["context"]["text"][match["context"]["offset"]:match["context"]["offset"] + match["context"]["length"]],
-                            "s": [replacement["value"] for replacement in match.get("replacements", [])[:1]]
-                        }
-                        errors.append(error)
+                        ctx = match.get("context", {})
+                        txt = ctx.get("text", "")
+                        offset = ctx.get("offset", 0)
+                        length = ctx.get("length", 0)
+                        word = txt[offset:offset + length] if txt else ""
+                        repl = match.get("replacements", [])[:1]
+                        s = [r.get("value", "") for r in repl] if repl else []
+                        errors.append({"word": word, "s": s})
                 return errors
         except Exception as e:
             print(f"LanguageTool error: {str(e)}")
         return []
+
+
+# =============================================================================
+# LanguageTool Local Server Manager (macOS Homebrew, no manual command)
+# =============================================================================
+
+class LanguageToolServerManager:
+    """Manages local LanguageTool server: detect install, start/stop via Homebrew or direct path.
+    Uses os.system() so it works in DaVinci Resolve (subprocess can hang in Qt context).
+    """
+    BREW_PATHS = ["/opt/homebrew/bin/brew", "/usr/local/bin/brew"]
+    LANGUAGETOOL_SERVER_PATHS = [
+        "/opt/homebrew/bin/languagetool-server",
+        "/usr/local/bin/languagetool-server",
+    ]
+    LANGUAGETOOL_CELLAR_PATHS = [
+        "/opt/homebrew/Cellar/languagetool",
+        "/usr/local/Cellar/languagetool",
+    ]
+
+    def __init__(self):
+        self.server_process = None
+        self.is_brew_installed = None
+        self.is_languagetool_installed = None
+        self._brew_path = None
+        self._languagetool_server_path = None
+
+    def _get_brew_path(self):
+        if self._brew_path is not None:
+            return self._brew_path
+        for path in self.BREW_PATHS:
+            if os.path.isfile(path) and os.access(path, os.X_OK):
+                self._brew_path = path
+                return path
+        return None
+
+    def _get_languagetool_server_path(self):
+        if self._languagetool_server_path is not None:
+            return self._languagetool_server_path
+        for path in self.LANGUAGETOOL_SERVER_PATHS:
+            if os.path.isfile(path) and os.access(path, os.X_OK):
+                self._languagetool_server_path = path
+                return path
+        return None
+
+    def check_brew_installed(self):
+        if self.is_brew_installed is not None:
+            return self.is_brew_installed
+        self.is_brew_installed = self._get_brew_path() is not None
+        return self.is_brew_installed
+
+    def check_languagetool_installed(self):
+        if self.check_server_running():
+            self.is_languagetool_installed = True
+            return True
+        if self.is_languagetool_installed is not None:
+            return self.is_languagetool_installed
+        if self._get_languagetool_server_path() is not None:
+            self.is_languagetool_installed = True
+            return True
+        for cellar_path in self.LANGUAGETOOL_CELLAR_PATHS:
+            if os.path.isdir(cellar_path):
+                self.is_languagetool_installed = True
+                return True
+        brew_path = self._get_brew_path()
+        if brew_path:
+            try:
+                import subprocess
+                result = subprocess.run(
+                    [brew_path, "list", "languagetool"],
+                    capture_output=True,
+                    timeout=5,
+                )
+                if result.returncode == 0:
+                    self.is_languagetool_installed = True
+                    return True
+            except Exception:
+                pass
+        self.is_languagetool_installed = False
+        return False
+
+    def check_server_running(self):
+        """Check if server responds on localhost:8081 (HTTP only, no subprocess)."""
+        try:
+            r = requests.get("http://localhost:8081/v2/languages", timeout=2)
+            if r.status_code == 200:
+                return True
+        except Exception:
+            pass
+        return False
+
+    def start_server(self):
+        """Start via brew services or direct languagetool-server. Uses os.system()."""
+        if self.check_server_running():
+            return True, "Server is already running"
+        self.is_languagetool_installed = None
+        self._languagetool_server_path = None
+        brew_path = self._get_brew_path()
+        lt_path = self._get_languagetool_server_path()
+        if brew_path and self.check_languagetool_installed():
+            cmd = f"'{brew_path}' services start languagetool 2>/dev/null"
+            os.system(cmd)
+            for i in range(5):
+                time.sleep(1)
+                if self.check_server_running():
+                    return True, "Server started successfully via Homebrew"
+        if lt_path and platform.system() == "Darwin":
+            cmd = f"nohup '{lt_path}' > /dev/null 2>&1 &"
+            os.system(cmd)
+            for i in range(5):
+                time.sleep(1)
+                if self.check_server_running():
+                    return True, "Server started successfully"
+            return False, "Server process started but not responding"
+        return False, "LanguageTool not installed. Install via: brew install languagetool"
+
+    def stop_server(self):
+        """Stop via brew services or kill port 8081. Uses os.system()."""
+        try:
+            if not self.check_server_running():
+                return True, "Server is not running"
+            brew_path = self._get_brew_path()
+            plist_path = os.path.expanduser("~/Library/LaunchAgents/homebrew.mxcl.languagetool.plist")
+            keepalive = False
+            if os.path.exists(plist_path):
+                try:
+                    with open(plist_path, "rb") as f:
+                        keepalive = plistlib.load(f).get("KeepAlive", False)
+                except Exception:
+                    pass
+            if keepalive:
+                os.system(f"launchctl unload '{plist_path}' 2>/dev/null")
+                time.sleep(0.5)
+            if brew_path:
+                os.system(f"'{brew_path}' services stop languagetool 2>/dev/null")
+                time.sleep(1)
+                if not self.check_server_running():
+                    return True, "Server stopped successfully"
+            os.system("lsof -ti:8081 | xargs kill -9 2>/dev/null")
+            time.sleep(0.5)
+            if not self.check_server_running():
+                return True, "Server stopped successfully"
+            if keepalive:
+                os.system(f"launchctl unload '{plist_path}' 2>/dev/null")
+                os.system("lsof -ti:8081 | xargs kill -9 2>/dev/null")
+                time.sleep(1)
+            if self.check_server_running():
+                return False, "Could not stop server. Try in terminal: brew services stop languagetool"
+            return True, "Server stopped (may have been stopped by another process)"
+        except Exception as e:
+            return False, str(e)
+
+    def get_installation_status(self):
+        brew_installed = self.check_brew_installed()
+        lt_installed = self.check_languagetool_installed()
+        server_running = self.check_server_running()
+        msg = ""
+        if not brew_installed:
+            msg = "Homebrew not installed. Install from https://brew.sh"
+        elif not lt_installed:
+            msg = "LanguageTool not installed. Run: brew install languagetool"
+        elif server_running:
+            msg = "Server is running"
+        else:
+            msg = "Server not running. Click 'Start server' to launch."
+        return {
+            "brew_installed": brew_installed,
+            "languagetool_installed": lt_installed,
+            "server_running": server_running,
+            "can_start": lt_installed,
+            "message": msg,
+        }
+
+
+class SpellingSettingsDialog(QDialog):
+    """Spelling options: Public API or Local Server (auto start/stop via Homebrew)."""
+    LOCAL_URL = "http://localhost:8081"
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Check Spelling — Settings")
+        self.setMinimumSize(520, 220)
+        self.server_manager = LanguageToolServerManager()
+        self.setStyleSheet("""
+            QDialog { background-color: #2A2A2A; color: #CCCCCC; }
+            QLabel { color: #CCCCCC; font-size: 11px; padding: 2px 0; }
+            QComboBox, QLineEdit {
+                background-color: #393939; color: #CCCCCC; border: 1px solid #666666;
+                border-radius: 4px; padding: 4px 8px; font-size: 11px; min-height: 20px;
+            }
+            QGroupBox {
+                color: #CCCCCC; font-size: 11px; font-weight: bold;
+                border: 1px solid #666666; border-radius: 5px; margin-top: 8px;
+            }
+            QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; color: #ba5e29; }
+            QPushButton {
+                background-color: #3A3A3A; color: #CCCCCC; border: 1px solid #666666;
+                border-radius: 6px; padding: 4px 12px; font-size: 11px; min-height: 20px;
+            }
+            QPushButton:hover { background-color: #454545; border-color: #888; }
+            QPushButton#runBtn { background-color: #ba5e29; color: #FFFFFF; font-size: 11px; padding: 4px 12px; }
+            QPushButton#runBtn:hover { background-color: #ca6e39; }
+            QPushButton:disabled { color: #666; }
+        """)
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+        layout.setContentsMargins(20, 20, 20, 20)
+
+        grp = QGroupBox("Spelling (LanguageTool)")
+        grp_layout = QVBoxLayout(grp)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Server:"))
+        self.server_combo = QComboBox()
+        self.server_combo.addItems(["LanguageTool (Public API)", "LanguageTool (Local Server)"])
+        self.server_combo.currentTextChanged.connect(self._on_server_changed)
+        row.addWidget(self.server_combo)
+        grp_layout.addLayout(row)
+
+        row2 = QHBoxLayout()
+        row2.addWidget(QLabel("Language:"))
+        self.language_combo = QComboBox()
+        self.language_combo.addItems(["Auto-Detect", "en-US", "fr-FR", "de-DE", "es-ES", "it-IT", "ru-RU"])
+        row2.addWidget(self.language_combo)
+        grp_layout.addLayout(row2)
+
+        # Local server block: status + Refresh + Start + Stop (no URL, no command)
+        self.local_block = QHBoxLayout()
+        self.local_status_label = QLabel("Status: —")
+        self.local_status_label.setStyleSheet("color: #888; font-size: 11px;")
+        self.refresh_btn = QPushButton("Refresh")
+        self.refresh_btn.clicked.connect(self._refresh_local_status)
+        self.start_server_btn = QPushButton("Start server")
+        self.start_server_btn.clicked.connect(self._on_start_server)
+        self.stop_server_btn = QPushButton("Stop server")
+        self.stop_server_btn.clicked.connect(self._on_stop_server)
+        self.local_block.addWidget(self.local_status_label)
+        self.local_block.addWidget(self.refresh_btn)
+        self.local_block.addWidget(self.start_server_btn)
+        self.local_block.addWidget(self.stop_server_btn)
+        self.local_block.addStretch()
+        grp_layout.addLayout(self.local_block)
+
+        layout.addWidget(grp)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        run_btn = QPushButton("Check Spelling")
+        run_btn.setObjectName("runBtn")
+        run_btn.clicked.connect(self.accept)
+        btn_layout.addWidget(cancel_btn)
+        btn_layout.addWidget(run_btn)
+        layout.addLayout(btn_layout)
+
+        self._on_server_changed(self.server_combo.currentText())
+
+    def _on_server_changed(self, text):
+        use_local = "Local" in text
+        for i in range(self.local_block.count()):
+            w = self.local_block.itemAt(i).widget()
+            if w:
+                w.setVisible(use_local)
+        if use_local:
+            self._refresh_local_status()
+        QTimer.singleShot(0, self.adjustSize)
+
+    def _refresh_local_status(self):
+        """Update status and Start/Stop button state (no manual command)."""
+        status = self.server_manager.get_installation_status()
+        self.local_status_label.setText("Status: " + status["message"])
+        if status["server_running"]:
+            self.local_status_label.setStyleSheet("color: #6a9e6a; font-size: 11px;")
+        elif status["languagetool_installed"]:
+            self.local_status_label.setStyleSheet("color: #888; font-size: 11px;")
+        else:
+            self.local_status_label.setStyleSheet("color: #c66; font-size: 11px;")
+        self.start_server_btn.setEnabled(status["can_start"] and not status["server_running"])
+        self.stop_server_btn.setEnabled(status["server_running"])
+
+    def _on_start_server(self):
+        self.start_server_btn.setEnabled(False)
+        self.stop_server_btn.setEnabled(False)
+        self.local_status_label.setText("Status: Starting server...")
+        self.local_status_label.setStyleSheet("color: #888; font-size: 11px;")
+        QApplication.processEvents()
+        QTimer.singleShot(100, self._do_start_server)
+
+    def _do_start_server(self):
+        try:
+            success, message = self.server_manager.start_server()
+            self.server_manager.is_brew_installed = None
+            self.server_manager.is_languagetool_installed = None
+            self._refresh_local_status()
+            if success:
+                QMessageBox.information(self, "Server", message)
+            else:
+                QMessageBox.warning(self, "Start server", message)
+        except Exception as e:
+            QMessageBox.warning(self, "Start server", str(e))
+            self._refresh_local_status()
+
+    def _on_stop_server(self):
+        reply = QMessageBox.question(
+            self, "Stop server",
+            "Stop the LanguageTool server?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        self.start_server_btn.setEnabled(False)
+        self.stop_server_btn.setEnabled(False)
+        self.local_status_label.setText("Status: Stopping server...")
+        self.local_status_label.setStyleSheet("color: #888; font-size: 11px;")
+        QApplication.processEvents()
+        QTimer.singleShot(100, self._do_stop_server)
+
+    def _do_stop_server(self):
+        try:
+            success, message = self.server_manager.stop_server()
+            self.server_manager.is_brew_installed = None
+            self._refresh_local_status()
+            if success:
+                if self.server_manager.check_server_running():
+                    QMessageBox.warning(
+                        self, "Server",
+                        "Server was stopped but restarted (e.g. KeepAlive). Try: brew services stop languagetool",
+                    )
+                else:
+                    QMessageBox.information(self, "Server", message)
+            else:
+                QMessageBox.warning(self, "Stop server", message)
+        except Exception as e:
+            QMessageBox.warning(self, "Stop server", str(e))
+            self._refresh_local_status()
+
+    def get_options(self):
+        use_local = "Local" in self.server_combo.currentText()
+        return (
+            self.language_combo.currentText(),
+            use_local,
+            self.LOCAL_URL,
+        )
+
+
 class PunctuationDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -706,10 +1043,9 @@ class SubtitleEditor(QMainWindow):
         self.filtered_clips = []
         self.clip_to_item_map = {}
         self.selected_type_filter = "All"
-        self.selected_spelling_service = "LanguageTool"
         self.search_mode = "Contains"
         self.editing_enabled = False
-        self.timeline_fps = self.get_timeline_fps() 
+        self.timeline_fps = self.get_timeline_fps()
         self.spell_checker = None
         self.smpte = SMPTE()
         self.smpte.fps = self.get_timeline_fps()
@@ -830,21 +1166,12 @@ class SubtitleEditor(QMainWindow):
             }
         """)
         
-        # Вкладки
-        self.tab_widget = QTabWidget()
-        main_layout.addWidget(self.tab_widget)
-        
-        # Вкладка Text Index
+        # Main content (no tabs)
         self.text_index_tab = QWidget()
-        self.tab_widget.addTab(self.text_index_tab, "Text Index")
+        main_layout.addWidget(self.text_index_tab)
         self.setup_text_index_tab()
-        
-        # Вкладка Settings
-        self.settings_tab = QWidget()
-        self.tab_widget.addTab(self.settings_tab, "Settings")
-        self.setup_settings_tab()
-        
-        # Статус бар
+
+        # Status bar
         self.status_bar = QLabel()
         self.status_bar.setAlignment(Qt.AlignCenter)
         self.status_bar.setStyleSheet("color: #c0c0c0; font-size: 12px; font-weight: bold; padding: 5px 0;")
@@ -1099,146 +1426,7 @@ class SubtitleEditor(QMainWindow):
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
         layout.addWidget(self.progress_bar)
-    def setup_settings_tab(self):
-        """Setup Settings tab with improved layout"""
-        layout = QVBoxLayout(self.settings_tab)
-        layout.setContentsMargins(20, 20, 20, 20)
-        layout.setSpacing(15)
 
-        layout.addSpacing(20)
-
-        # Настройки проверки орфографии
-        spelling_group = QGroupBox("Spelling Settings")
-        spelling_layout = QVBoxLayout(spelling_group)
-        spelling_layout.setContentsMargins(15, 15, 15, 15)
-        
-        spelling_panel = QHBoxLayout()
-        spelling_panel.addWidget(QLabel("Spelling Service:"))
-        self.spelling_service_combo = QComboBox()
-        self.spelling_service_combo.addItems(["LanguageTool", "Yandex Speller"])
-        spelling_panel.addWidget(self.spelling_service_combo)
-        spelling_layout.addLayout(spelling_panel)
-
-        language_panel = QHBoxLayout()
-        language_panel.addWidget(QLabel("Language:"))
-        self.language_combo = QComboBox()
-        self.language_combo.addItems(["Auto-Detect", "en-US", "fr-FR", "de-DE", "es-ES", "it-IT", "ru-RU"])
-        language_panel.addWidget(self.language_combo)
-        spelling_layout.addLayout(language_panel)
-
-        layout.addWidget(spelling_group)
-
-        # Информационный блок
-        info_group = QGroupBox("About this Tool")
-        info_layout = QVBoxLayout(info_group)
-        info_layout.setContentsMargins(15, 15, 15, 15)
-        
-        info_text = QTextEdit()
-        info_text.setReadOnly(True)
-        info_text.setHtml("""
-            <style>
-                h3 {
-                    font-size: 16px;
-                    color: #CCCCCC;
-                    margin-top: 10px;
-                    margin-bottom: 5px;
-                }
-            </style>
-            <h3>RMT Text Index Tool v16</h3>
-            <p><b>Text Editing Guide:</b></p>
-            <ul>
-                <li><b>Start Editing:</b> Double-click text cell or use editor panel</li>
-                <li><b>Confirm Edit:</b> Press <span style='color:#ba5e29'>Enter</span></li>
-                <li><b>New Line:</b> <span style='color:#ba5e29'>Cmd+Enter</span> (Mac) / <span style='color:#ba5e29'>Ctrl+Enter</span> (Win)</li>
-                <li><b>Cancel:</b> <span style='color:#ba5e29'>Esc</span></li>
-                <li><b>Navigation:</b> Double-click timecode to jump</li>
-            </ul>
-            <p><b>Keyboard Shortcuts:</b></p>
-            <ul>
-                <li><span style='color:#ba5e29'>Ctrl+F</span> - Focus search field</li>
-                <li><span style='color:#ba5e29'>Ctrl+S</span> - Apply changes in editor</li>
-                <li><span style='color:#ba5e29'>Esc</span> - Revert changes in editor</li>
-            </ul>
-            <p><b>CSV Export/Import:</b></p>
-            <ul>
-                <li><b>Export to CSV</b> - Save Text+/MultiText/Subtitles for external editing</li>
-                <li><b>Import from CSV</b> - Load edited CSV; Load mode updates tree, Apply mode writes to timeline</li>
-                <li>Apply applies Text+/MultiText directly and regenerates subtitle track</li>
-            </ul>
-            <p><b>Supported Clip Types:</b></p>
-            <ul>
-                <li>Text+</li>
-                <li>MultiText layers</li>
-                <li>Subtitles</li>
-            </ul>
-            <h3>Find & Replace</h3>
-            <ul>
-                <li><b>Replace</b> - Replace in selected clip</li>
-                <li><b>Replace All</b> - Replace in all matching clips</li>
-                <li>Match case option for precise replacements</li>
-                <li>Works with all search modes (Contains, Exact, etc.)</li>
-            </ul>
-            <h3>Spelling Check</h3>
-            <ul>
-                <li>Errors are shown in format: <i>word → suggestion</i></li>
-                <li>Use <b>right-click → Copy</b> on error messages</li>
-                <li>Multiple suggestions are comma-separated</li>
-            </ul>
-            <h3>Punctuation Cleaning</h3>
-            <ul>
-                <li>Use <b>Clean Punctuation</b> to remove punctuation from subtitles</li>
-                <li>Select punctuation marks (e.g., Dots, Commas) and click <b>Apply</b></li>
-                <li>Changes are applied to all subtitles and saved in memory</li>
-                <li><b>Note:</b> Filters are reset after cleaning</li>
-            </ul>
-        """)
-        info_text.setStyleSheet("""
-            QTextEdit {
-                background-color: #2A2A2A;
-                border: 1px solid #3A3A3A;
-                border-radius: 5px;
-                color: #CCCCCC;
-                font-size: 12px;
-                padding: 10px;
-            }
-            QTextEdit a {
-                color: #ba5e29;
-                text-decoration: none;
-            }
-        """)
-        info_text.setMinimumHeight(280)
-        info_layout.addWidget(info_text)
-
-        layout.addWidget(info_group)
-
-        layout.addStretch()
-
-        # Кнопка сайта
-        website_container = QHBoxLayout()
-        website_container.addStretch()
-        self.website_btn = QPushButton("Учебный онлайн центр ResolveMaster.training")
-        self.website_btn.setFixedSize(400, 50)
-        self.website_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #ba5e29;
-                color: #FFFFFF;
-                border: none;
-                border-radius: 12px;
-                padding: 5px 15px;
-                min-height: 35px;
-                font-size: 14px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #ca6e39;
-            }
-            QPushButton:pressed {
-                background-color: #aa4e19;
-            }
-        """)
-        website_container.addWidget(self.website_btn)
-        website_container.addStretch()
-        layout.addLayout(website_container)
     def _sanitize_node_name_for_id(self, name):
         """Sanitize node name for use in unique_id (CSV-safe)."""
         if not name:
@@ -1285,7 +1473,6 @@ class SubtitleEditor(QMainWindow):
         self.search_btn.clicked.connect(self.on_search_clicked)
         self.reset_btn.clicked.connect(self.on_reset_clicked)
         self.type_filter_combo.currentTextChanged.connect(self.on_type_filter_changed)
-        self.spelling_service_combo.currentTextChanged.connect(self.on_spelling_service_changed)
         self.search_input.returnPressed.connect(self.on_search_clicked)
         self.add_markers_btn.clicked.connect(self.add_markers)
         self.check_spelling_btn.clicked.connect(self.on_check_spelling)
@@ -1293,7 +1480,6 @@ class SubtitleEditor(QMainWindow):
         self.apply_changes_btn.clicked.connect(self.on_apply_changes)
         self.export_csv_btn.clicked.connect(self.on_export_csv)
         self.import_csv_btn.clicked.connect(self.show_import_dialog)
-        self.website_btn.clicked.connect(self.on_website_button_clicked)
         self.clean_punctuation_btn.clicked.connect(self.on_clean_punctuation)
         self.tree_widget.itemDoubleClicked.connect(self.on_item_double_clicked)
         self.tree_widget.itemChanged.connect(self.on_item_changed)
@@ -2367,26 +2553,23 @@ class SubtitleEditor(QMainWindow):
         if not self.all_clips:
             self.status_bar.setText("No clips loaded for checking")
             return
-        
-        # Создаем и запускаем поток проверки орфографии
+        dlg = SpellingSettingsDialog(self)
+        if dlg.exec() != QDialog.Accepted:
+            return
+        language, use_local, local_url = dlg.get_options()
         self.spell_checker = SpellCheckerThread(
             self.all_clips.copy(),
-            self.selected_spelling_service,
-            self.language_combo.currentText()
+            language,
+            use_local=use_local,
+            local_url=local_url,
         )
-        
-        # Подключаем сигналы
         self.spell_checker.progress.connect(self.update_progress)
         self.spell_checker.finished.connect(self.on_spell_check_finished)
         self.spell_checker.error.connect(self.on_spell_check_error)
-        
-        # Показываем прогресс-бар и блокируем кнопку
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
         self.check_spelling_btn.setEnabled(False)
         self.status_bar.setText("Checking spelling...")
-        
-        # Запускаем проверку
         self.spell_checker.start()
 
     def update_progress(self, current, total):
@@ -2438,10 +2621,6 @@ class SubtitleEditor(QMainWindow):
         self.selected_type_filter = text
         self.filter_tree(self.search_input.text())
 
-    def on_spelling_service_changed(self, text):
-        self.selected_spelling_service = text
-        self.status_bar.setText(f"Selected service: {text}")
-
     def on_search_mode_changed(self, text):
         """Обработчик изменения режима поиска"""
         self.search_mode = text
@@ -2449,12 +2628,6 @@ class SubtitleEditor(QMainWindow):
         # Применяем текущий поиск с новым режимом
         self.filter_tree(self.search_input.text())
 
-    def on_website_button_clicked(self):
-        try:
-            webbrowser.open("https://resolvemaster.training")
-            self.status_bar.setText("Opened website")
-        except Exception as e:
-            self.status_bar.setText(f"Error opening website: {str(e)}")
     def on_item_double_clicked(self, item, column):
         """Обработка двойного клика - навигация при клике в любом месте, если редактирование отключено"""
         if not timeline:
