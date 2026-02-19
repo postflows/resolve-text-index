@@ -727,7 +727,7 @@ class SubtitleEditor(QMainWindow):
         
     def setup_ui(self):
         """Setup main interface"""
-        self.setWindowTitle("RMT Text Index v16")
+        self.setWindowTitle("Text Index")
         self.setGeometry(300, 300, 600, 700)
         
         central_widget = QWidget()
