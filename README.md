@@ -10,7 +10,7 @@ Provides a PySide6 UI to list text elements by type and timecode, edit in place,
 
 ## Requirements
 
-- DaVinci Resolve 18+
+- DaVinci Resolve 20+ (Studio Version)
 - Python 3.6+
 - PySide6, requests (see [INSTALL_DEPENDENCIES.md](INSTALL_DEPENDENCIES.md) — standard pip first)
 
